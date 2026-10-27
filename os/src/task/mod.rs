@@ -36,7 +36,7 @@ pub struct TaskManager {
     /// total number of tasks
     num_app: usize,
     /// use inner value to get mutable access
-    inner: UPSafeCell<TaskManagerInner>,
+    pub inner: UPSafeCell<TaskManagerInner>,
 }
 
 /// Inner of Task Manager
@@ -135,6 +135,11 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+    /// Get the current task's id.
+    fn get_current_task_id(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        inner.current_task
+    }
 }
 
 /// Run the first task in task list.
@@ -169,3 +174,9 @@ pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
 }
+/// Get the current task's id.
+pub fn get_current_task_id() -> usize {
+    TASK_MANAGER.get_current_task_id()
+}
+
+
