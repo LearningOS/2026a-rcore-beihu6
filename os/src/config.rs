@@ -8,6 +8,8 @@ pub const USER_STACK_SIZE: usize = 4096 * 2;
 pub const KERNEL_STACK_SIZE: usize = 4096 * 2;
 /// kernel heap size
 pub const KERNEL_HEAP_SIZE: usize = 0x200_0000;
+/// the max number of tasks
+pub const MAX_APP_NUM: usize = 32;
 
 /// page size : 4KB
 pub const PAGE_SIZE: usize = 0x1000;
@@ -23,3 +25,4 @@ pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 pub const CLOCK_FREQ: usize = 12500000;
 /// the physical memory end
 pub const MEMORY_END: usize = 0x88000000;
+

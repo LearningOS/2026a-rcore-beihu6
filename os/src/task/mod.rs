@@ -15,6 +15,7 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
@@ -120,6 +121,30 @@ impl TaskManager {
         inner.tasks[inner.current_task].get_user_token()
     }
 
+    /// Map an anonymous user range into the current task.
+    fn map_current_anonymous(&self, start: usize, len: usize, prot: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        let mut permission = MapPermission::U;
+        if prot & 0x1 != 0 {
+            permission |= MapPermission::R;
+        }
+        if prot & 0x2 != 0 {
+            permission |= MapPermission::W;
+        }
+        if prot & 0x4 != 0 {
+            permission |= MapPermission::X;
+        }
+        inner.tasks[cur].memory_set.map_anonymous(VirtAddr(start), len, permission)
+    }
+
+    /// Unmap an anonymous user range from the current task.
+    fn unmap_current_anonymous(&self, start: usize, len: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let cur = inner.current_task;
+        inner.tasks[cur].memory_set.unmap_anonymous(VirtAddr(start), len)
+    }
+
     /// Get the current 'Running' task's trap contexts.
     fn get_current_trap_cx(&self) -> &'static mut TrapContext {
         let inner = self.inner.exclusive_access();
@@ -193,6 +218,16 @@ pub fn current_user_token() -> usize {
     TASK_MANAGER.get_current_token()
 }
 
+/// Map an anonymous range into the current task's address space.
+pub fn current_map_anonymous(start: usize, len: usize, prot: usize) -> bool {
+    TASK_MANAGER.map_current_anonymous(start, len, prot)
+}
+
+/// Unmap an anonymous range from the current task's address space.
+pub fn current_unmap_anonymous(start: usize, len: usize) -> bool {
+    TASK_MANAGER.unmap_current_anonymous(start, len)
+}
+
 /// Get the current 'Running' task's trap contexts.
 pub fn current_trap_cx() -> &'static mut TrapContext {
     TASK_MANAGER.get_current_trap_cx()
@@ -201,4 +236,10 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Get the current 'Running' task's id.
+pub fn get_current_task_id() -> usize {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    inner.current_task
 }
