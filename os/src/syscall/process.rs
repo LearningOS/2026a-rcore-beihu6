@@ -1,6 +1,7 @@
 //! Process management syscalls
 use crate::task::{change_program_brk, exit_current_and_run_next, suspend_current_and_run_next,current_user_token};
 use crate::mm::translated_byte_buffer;
+use crate::timer::get_time_us;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -28,8 +29,25 @@ pub fn sys_yield() -> isize {
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    let buffers = crate::mm::translated_byte_buffer(current_user_token(), _ts as *const u8, core::mem::size_of::<TimeVal>());
-    -1
+    let buffers = translated_byte_buffer(current_user_token(), _ts as *const u8, core::mem::size_of::<TimeVal>());
+    let time = get_time_us();
+    let timeval = TimeVal {
+        sec: time / 1_000_000,
+        usec: time % 1_000_000,
+    };
+    let timeval_bytes = unsafe { core::slice::from_raw_parts((&timeval as *const TimeVal) as *const u8, core::mem::size_of::<TimeVal>()) };
+    let mut offset = 0;
+    let mut remaining = timeval_bytes.len();
+    for slice in buffers{
+        let len = slice.len().min(core::mem::size_of::<TimeVal>());
+        slice[..len].copy_from_slice(&timeval_bytes[offset..offset + len]);
+        offset += len;
+        remaining -= len;
+        if remaining == 0 {
+            break;
+        }
+    }
+    0
 }
 
 /// TODO: Finish sys_trace to pass testcases
