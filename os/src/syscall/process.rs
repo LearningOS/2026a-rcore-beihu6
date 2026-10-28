@@ -54,7 +54,27 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    match _trace_request{
+        0 => {
+            // Handle trace request 0
+            let ptr = _id as *const u8;
+            let byte = unsafe { *ptr };
+            return byte as isize; 
+        }
+        1 => {
+            // Handle trace request 1
+            let ptr = _id as *mut u8;
+            unsafe{ ptr.write_volatile(_data as u8);}
+            return 0;
+        }
+        2 =>{
+            let current_task_id = get_current_task_id();
+            return SYSCALL_COUNT[current_task_id].exclusive_access().get_count(_id) as isize;
+        }
+        _ => {
+            return -1;
+        }
+    }
 }
 
 // YOUR JOB: Implement mmap.
