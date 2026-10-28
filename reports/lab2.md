@@ -1,4 +1,7 @@
 # lab2实验报告
+## 完成内容
+重写sys_trace并实现sys_mmap和sys_munmap,以支持虚拟地址，并将SYSCALL_COUNT改为Vec防止内核栈溢出
+## 问答题
 ## 1.请列举 SV39 页表页表项的组成，描述其中的标志位有何作用
 `pte`有64位
 * 63-54：reversed,保留位
