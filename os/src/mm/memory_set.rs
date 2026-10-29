@@ -60,6 +60,52 @@ impl MemorySet {
             None,
         );
     }
+    /// Map an anonymous page range for userspace.
+    pub fn map_anonymous(&mut self, start_va: VirtAddr, len: usize, permission: MapPermission) -> bool {
+        if len == 0 {
+            return true;
+        }
+        if !start_va.aligned() || start_va.0.checked_add(len).is_none() {
+            return false;
+        }
+        let end_va = VirtAddr(start_va.0 + len);
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            // `PageTable::translate` also returns `Some` for an invalid leaf PTE,
+            // so check `is_valid` instead of just `is_some`.
+            if self.page_table.translate(vpn).map_or(false, |pte| pte.is_valid()) {
+                return false;
+            }
+        }
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            let frame = frame_alloc().unwrap();
+            let flags = PTEFlags::from_bits(permission.bits).unwrap() | PTEFlags::U | PTEFlags::V;
+            self.page_table.map(vpn, frame.ppn, flags);
+        }
+        true
+    }
+    /// Unmap an anonymous page range for userspace.
+    pub fn unmap_anonymous(&mut self, start_va: VirtAddr, len: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        if !start_va.aligned() || start_va.0.checked_add(len).is_none() {
+            return false;
+        }
+        let end_va = VirtAddr(start_va.0 + len);
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if !self.page_table.translate(vpn).map_or(false, |pte| pte.is_valid()) {
+                return false;
+            }
+        }
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            self.page_table.unmap(vpn);
+        }
+        true
+    }
     /// remove a area
     pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
         if let Some((idx, area)) = self

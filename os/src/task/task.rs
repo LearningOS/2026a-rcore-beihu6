@@ -8,6 +8,7 @@ use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use crate::config::BIG_STRIDE;
 
 /// Task control block structure
 ///
@@ -37,6 +38,12 @@ impl TaskControlBlock {
 }
 
 pub struct TaskControlBlockInner {
+    /// The priority of the task, the smaller the number, the higher the priority
+    pub priority: usize,
+    /// The stride of the task, the smaller the number, the higher the priority
+    pub stride: u64,
+    /// The pass of the task, the smaller the number, the higher the priority
+    pub pass: u64,
     /// The physical page number of the frame where the trap context is placed
     pub trap_cx_ppn: PhysPageNum,
 
@@ -108,7 +115,10 @@ impl TaskControlBlock {
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
+                    priority:16,
+                    stride:0,
+                    pass:BIG_STRIDE/16,
+                    trap_cx_ppn:trap_cx_ppn,
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
@@ -181,7 +191,10 @@ impl TaskControlBlock {
             kernel_stack,
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
-                    trap_cx_ppn,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
+                    trap_cx_ppn: trap_cx_ppn,
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
@@ -206,6 +219,16 @@ impl TaskControlBlock {
         // ---- release parent PCB
     }
 
+    /// spwan a new process, which is the combination of fork and exec
+    pub fn spawn(self:&Arc<Self>, elf_data: &[u8]) -> Arc<TaskControlBlock> {
+        let new_process = Arc::new(TaskControlBlock::new(elf_data));
+        {
+            let mut inner = new_process.inner_exclusive_access();
+            inner.parent = Some(Arc::downgrade(self));
+        }
+        self.inner_exclusive_access().children.push(new_process.clone());
+        new_process
+    }
     /// get pid of process
     pub fn getpid(&self) -> usize {
         self.pid.0

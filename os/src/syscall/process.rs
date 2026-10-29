@@ -3,11 +3,13 @@ use alloc::sync::Arc;
 
 use crate::{
     loader::get_app_data_by_name,
-    mm::{translated_refmut, translated_str},
+    mm::{translated_refmut, translated_str,translated_byte_buffer,PageTable,VirtAddr},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next,current_map_anonymous,current_unmap_anonymous
     },
+    config::{BIG_STRIDE, PAGE_SIZE_BITS},
+    timer::get_time_us,
 };
 
 #[repr(C)]
@@ -15,6 +17,40 @@ use crate::{
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
+}
+/// Check if a user process can access a memory range with given start address and length.
+fn check_user_access(start: usize, len: usize, readable: bool, writable: bool) -> bool {
+    if len == 0 {
+        return true;
+    }
+    let end = match start.checked_add(len) {
+        Some(end) => end,
+        None => return false,
+    };
+    let page_table = PageTable::from_token(current_user_token());
+    let mut cur = start;
+    while cur < end {
+        // NOTE: `cur` is a virtual address, so convert it to a page number via
+        // `VirtAddr::floor()`; `cur.into()` would truncate it as a VPN instead.
+        let pte = match page_table.translate(VirtAddr::from(cur).floor()) {
+            Some(pte) => pte,
+            None => return false,
+        };
+        if !pte.is_valid() || !pte.user() {
+            return false;
+        }
+        if readable && !pte.readable() {
+            return false;
+        }
+        if writable && !pte.writable() {
+            return false;
+        }
+        cur = ((cur >> PAGE_SIZE_BITS) + 1) << PAGE_SIZE_BITS;
+        if cur > end {
+            cur = end;
+        }
+    }
+    true
 }
 
 /// task exits and submit an exit code
@@ -64,6 +100,22 @@ pub fn sys_exec(path: *const u8) -> isize {
     }
 }
 
+/// YOUR JOB: Implement spawn.
+/// HINT: fork + exec =/= spawn
+pub fn sys_spawn(path: *const u8) -> isize {
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let task = current_task().unwrap();
+        let new_task = task.spawn(data);
+        let res = new_task.getpid() as isize;
+        add_task(new_task);
+        res
+    } else {
+        -1
+    }
+}
+
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
@@ -106,29 +158,65 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+    if !check_user_access(_ts as usize, core::mem::size_of::<TimeVal>(), true, true) {
+        return -1;
+    }
+    let time = get_time_us();
+    let timeval = TimeVal {
+        sec: time / 1_000_000,
+        usec: time % 1_000_000,
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            (&timeval as *const TimeVal) as *const u8,
+            core::mem::size_of::<TimeVal>(),
+        )
+    };
+    let mut dst = translated_byte_buffer(current_user_token(), _ts as *const u8, bytes.len());
+    let mut pos = 0;
+    for chunk in dst.iter_mut() {
+        let n = (bytes.len() - pos).min(chunk.len());
+        chunk[..n].copy_from_slice(&bytes[pos..pos + n]);
+        pos += n;
+        if pos == bytes.len() {
+            break;
+        }
+    }
+    0
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    if start % 4096 != 0 {
+        return -1;
+    }
+    if prot & !0x7 != 0 || prot == 0 || prot & 0x7 == 0 {
+        return -1;
+    }
+    if start.checked_add(len).is_none() {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    if !current_map_anonymous(start, len, prot) {
+        return -1;
+    }
+    0
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    if start % 4096 != 0 || start.checked_add(len).is_none() {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    if !current_unmap_anonymous(start, len) {
+        return -1;
+    }
+    0
 }
 
 /// change data segment size
@@ -141,21 +229,16 @@ pub fn sys_sbrk(size: i32) -> isize {
     }
 }
 
-/// YOUR JOB: Implement spawn.
-/// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
-}
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_set_priority(prio: isize) -> isize {
+    if prio < 2 {
+        return -1;
+    }
+    let prio_usize = prio as usize;
+    let current = current_task().unwrap();
+    let mut inner = current.inner_exclusive_access();
+    inner.priority = prio_usize;
+    inner.pass = BIG_STRIDE / (prio_usize as u64);
+    prio
 }

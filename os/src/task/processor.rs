@@ -11,6 +11,7 @@ use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
+use crate::mm::{MapPermission, VirtAddr};
 
 /// Processor management structure
 pub struct Processor {
@@ -44,6 +45,29 @@ impl Processor {
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
+
+    /// Map an anonymous user range into the current task.
+    fn map_current_anonymous(&self, start: usize, len: usize, prot: usize) -> bool {
+        let mut task = self.current.as_ref().unwrap().inner_exclusive_access();
+        let mut permission = MapPermission::U;
+        if prot & 0x1 != 0 {
+            permission |= MapPermission::R;
+        }
+        if prot & 0x2 != 0 {
+            permission |= MapPermission::W;
+        }
+        if prot & 0x4 != 0 {
+            permission |= MapPermission::X;
+        }
+        task.memory_set.map_anonymous(VirtAddr(start), len, permission)
+    }
+
+    /// Unmap an anonymous user range from the current task.
+    fn unmap_current_anonymous(&self, start: usize, len: usize) -> bool {
+        let mut task = self.current.as_ref().unwrap().inner_exclusive_access();
+        task.memory_set.unmap_anonymous(VirtAddr(start), len)
+    }
+
 }
 
 lazy_static! {
@@ -98,6 +122,16 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
         .unwrap()
         .inner_exclusive_access()
         .get_trap_cx()
+}
+
+/// Map an anonymous range into the current task's address space.
+pub fn current_map_anonymous(start: usize, len: usize, prot: usize) -> bool {
+    PROCESSOR.exclusive_access().map_current_anonymous(start, len, prot)
+}
+
+/// Unmap an anonymous range from the current task's address space.
+pub fn current_unmap_anonymous(start: usize, len: usize) -> bool {
+    PROCESSOR.exclusive_access().unmap_current_anonymous(start, len)
 }
 
 ///Return to idle control flow for new scheduling
