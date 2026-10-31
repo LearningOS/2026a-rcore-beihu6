@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{BIG_STRIDE, TRAP_CONTEXT_BASE};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
@@ -51,6 +51,13 @@ pub struct TaskControlBlockInner {
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
+
+    /// The priority of the task, the smaller the number, the higher the priority
+    pub priority: usize,
+    /// The stride of the task, the smaller the number, the higher the priority
+    pub stride: u64,
+    /// The pass of the task, the smaller the number, the higher the priority
+    pub pass: u64,
 
     /// Application address space
     pub memory_set: MemorySet,
@@ -121,6 +128,9 @@ impl TaskControlBlock {
                     base_size: user_sp,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    priority: 16,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16,
                     memory_set,
                     parent: None,
                     children: Vec::new(),
@@ -209,6 +219,9 @@ impl TaskControlBlock {
                     base_size: parent_inner.base_size,
                     task_cx: TaskContext::goto_trap_return(kernel_stack_top),
                     task_status: TaskStatus::Ready,
+                    priority: parent_inner.priority,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                     memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -229,6 +242,19 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// spawn a new process, which is the combination of fork and exec
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<TaskControlBlock> {
+        let new_process = Arc::new(TaskControlBlock::new(elf_data));
+        {
+            let mut inner = new_process.inner_exclusive_access();
+            inner.parent = Some(Arc::downgrade(self));
+        }
+        self.inner_exclusive_access()
+            .children
+            .push(new_process.clone());
+        new_process
     }
 
     /// get pid of process
