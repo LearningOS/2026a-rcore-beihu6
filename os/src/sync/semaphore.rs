@@ -8,6 +8,11 @@ use alloc::{collections::VecDeque, sync::Arc};
 pub struct Semaphore {
     /// semaphore inner
     pub inner: UPSafeCell<SemaphoreInner>,
+    /// The total number of resources this semaphore was created with.
+    ///
+    /// Deadlock detection needs it to compute how many resources are
+    /// still available (`total` minus everything allocated to threads).
+    pub total: usize,
 }
 
 pub struct SemaphoreInner {
@@ -26,6 +31,7 @@ impl Semaphore {
                     wait_queue: VecDeque::new(),
                 })
             },
+            total: res_count,
         }
     }
 

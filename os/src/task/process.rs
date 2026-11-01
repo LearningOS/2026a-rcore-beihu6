@@ -49,6 +49,16 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// Whether deadlock detection is enabled for this process
+    pub deadlock_detect: bool,
+    /// Allocation matrix of mutexes, indexed by `[tid][mutex_id]`
+    pub mutex_allocation: Vec<Vec<usize>>,
+    /// Pending request matrix of mutexes, indexed by `[tid][mutex_id]`
+    pub mutex_need: Vec<Vec<usize>>,
+    /// Allocation matrix of semaphores, indexed by `[tid][semaphore_id]`
+    pub semaphore_allocation: Vec<Vec<usize>>,
+    /// Pending request matrix of semaphores, indexed by `[tid][semaphore_id]`
+    pub semaphore_need: Vec<Vec<usize>>,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +91,139 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+
+    /// Record a pending mutex request of task `tid` 
+    pub fn mutex_request(&mut self, tid: usize, mutex_id: usize) -> bool {
+        Self::grow(&mut self.mutex_need, tid, mutex_id);
+        self.mutex_need[tid][mutex_id] += 1;
+        // A mutex is a binary resource: its capacity is always one.
+        let total = vec![1; self.mutex_list.len()];
+        if self.is_safe(&total, &self.mutex_allocation, &self.mutex_need) {
+            true
+        } else {
+            self.mutex_need[tid][mutex_id] -= 1;
+            false
+        }
+    }
+
+    /// Update the matrices after task `tid` has successfully locked `mutex_id`.
+    pub fn mutex_acquired(&mut self, tid: usize, mutex_id: usize) {
+        Self::decrease(&mut self.mutex_need, tid, mutex_id);
+        Self::grow(&mut self.mutex_allocation, tid, mutex_id);
+        self.mutex_allocation[tid][mutex_id] += 1;
+    }
+
+    /// Update the matrices after task `tid` has unlocked `mutex_id`.
+    pub fn mutex_released(&mut self, tid: usize, mutex_id: usize) {
+        Self::decrease(&mut self.mutex_allocation, tid, mutex_id);
+    }
+
+    /// Record a pending semaphore request of task `tid`
+    pub fn semaphore_request(&mut self, tid: usize, sem_id: usize) -> bool {
+        Self::grow(&mut self.semaphore_need, tid, sem_id);
+        self.semaphore_need[tid][sem_id] += 1;
+        let total: Vec<usize> = self
+            .semaphore_list
+            .iter()
+            .map(|sem| sem.as_ref().map_or(0, |sem| sem.total))
+            .collect();
+        if self.is_safe(
+            &total,
+            &self.semaphore_allocation,
+            &self.semaphore_need,
+        ) {
+            true
+        } else {
+            self.semaphore_need[tid][sem_id] -= 1;
+            false
+        }
+    }
+
+    /// Update the matrices after task `tid` has successfully acquired `sem_id`.
+    pub fn semaphore_acquired(&mut self, tid: usize, sem_id: usize) {
+        Self::decrease(&mut self.semaphore_need, tid, sem_id);
+        Self::grow(&mut self.semaphore_allocation, tid, sem_id);
+        self.semaphore_allocation[tid][sem_id] += 1;
+    }
+
+    /// Update the matrices after task `tid` has released one unit of `sem_id`.
+    pub fn semaphore_released(&mut self, tid: usize, sem_id: usize) {
+        Self::decrease(&mut self.semaphore_allocation, tid, sem_id);
+    }
+
+    /// Clear all resource bookkeeping of task `tid`.
+    pub fn reset_task_resources(&mut self, tid: usize) {
+        Self::clear_row(&mut self.mutex_allocation, tid);
+        Self::clear_row(&mut self.mutex_need, tid);
+        Self::clear_row(&mut self.semaphore_allocation, tid);
+        Self::clear_row(&mut self.semaphore_need, tid);
+    }
+
+    /// Grow `matrix` so that `matrix[tid][res]` is a valid slot.
+    fn grow(matrix: &mut Vec<Vec<usize>>, tid: usize, res: usize) {
+        while matrix.len() <= tid {
+            matrix.push(Vec::new());
+        }
+        while matrix[tid].len() <= res {
+            matrix[tid].push(0);
+        }
+    }
+
+    /// Decrease `matrix[tid][res]` by one, saturating at zero.
+    fn decrease(matrix: &mut Vec<Vec<usize>>, tid: usize, res: usize) {
+        if let Some(value) = matrix.get_mut(tid).and_then(|row| row.get_mut(res)) {
+            *value = value.saturating_sub(1);
+        }
+    }
+
+    /// Zero one row of a resource matrix.
+    fn clear_row(matrix: &mut Vec<Vec<usize>>, tid: usize) {
+        if let Some(row) = matrix.get_mut(tid) {
+            for value in row.iter_mut() {
+                *value = 0;
+            }
+        }
+    }
+
+    /// Banker's safety check.
+    fn is_safe(
+        &self,
+        total: &[usize],
+        allocation: &[Vec<usize>],
+        need: &[Vec<usize>],
+    ) -> bool {
+        let n = self.tasks.len();
+        let m = total.len();
+        let get = |matrix: &[Vec<usize>], tid: usize, res: usize| -> usize {
+            matrix
+                .get(tid)
+                .and_then(|row| row.get(res))
+                .copied()
+                .unwrap_or(0)
+        };
+        let mut work = Vec::with_capacity(m);
+        for (res, &capacity) in total.iter().enumerate() {
+            let allocated: usize = (0..n).map(|tid| get(allocation, tid, res)).sum();
+            work.push(capacity.saturating_sub(allocated));
+        }
+        let mut finish: Vec<bool> = (0..n).map(|tid| self.tasks[tid].is_none()).collect();
+        loop {
+            let mut progressed = false;
+            for tid in 0..n {
+                if !finish[tid] && (0..m).all(|res| get(need, tid, res) <= work[res]) {
+                    for res in 0..m {
+                        work[res] += get(allocation, tid, res);
+                    }
+                    finish[tid] = true;
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        finish.iter().all(|&done| done)
     }
 }
 
@@ -119,6 +262,11 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: false,
+                    mutex_allocation: Vec::new(),
+                    mutex_need: Vec::new(),
+                    semaphore_allocation: Vec::new(),
+                    semaphore_need: Vec::new(),
                 })
             },
         });
@@ -245,6 +393,11 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: false,
+                    mutex_allocation: Vec::new(),
+                    mutex_need: Vec::new(),
+                    semaphore_allocation: Vec::new(),
+                    semaphore_need: Vec::new(),
                 })
             },
         });
